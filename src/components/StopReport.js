@@ -1,36 +1,83 @@
 import React, { useState, useEffect } from 'react';
-import * as XLSX from 'xlsx';
+import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import styled from 'styled-components';
-import { v4 as uuidv4 } from 'uuid'; // Import uuidv4 function from uuid library
+import { v4 as uuidv4 } from 'uuid';
 
 const StopReport = ({ dataEmit }) => {
-    // Initialize state with local storage data or default
     const [data, setData] = useState(() => {
         const savedData = localStorage.getItem('realTimeTableData');
         return savedData ? JSON.parse(savedData) : [];
     });
     const [textInputs, setTextInputs] = useState({});
+    const [editing, setEditing] = useState({});
+    const [currentStoppage, setCurrentStoppage] = useState(null);
 
-    // Update local storage whenever 'data' changes
     useEffect(() => {
         localStorage.setItem('realTimeTableData', JSON.stringify(data));
     }, [data]);
 
     useEffect(() => {
-        if (dataEmit.isMoving === 'Stopped') {
-            const newDataObject = {
+        if (dataEmit.isMoving === 'Stopped' && currentStoppage==null) {
+            const startTime = dataEmit.timestamp ? new Date(dataEmit.timestamp).getTime() : Date.now();
+            const newStoppage = {
                 id: uuidv4(),
                 timestamp: dataEmit.timestamp ? new Date(dataEmit.timestamp).toLocaleString() : '',
-                remarks: '', // Initialize remarks as empty string
-                date: new Date().toLocaleDateString(), // Current date
-                time: new Date().toLocaleTimeString() // Current time
+                startTime: startTime,
+                remarks: '',
+                date: new Date().toLocaleDateString(),
+                time: new Date().toLocaleTimeString(),
+                stoppageTime: 0
             };
 
-            // Update state to include the new data object
-            setData(prevData => [...prevData, newDataObject]);
+            setCurrentStoppage(newStoppage);
+            setData(prevData => [...prevData, newStoppage]);
+        } else if (dataEmit.isMoving === 'Moving' && currentStoppage) {
+            const endTime = dataEmit.timestamp ? new Date(dataEmit.timestamp).getTime() : Date.now();
+            const stoppageTime = endTime - currentStoppage.startTime;
+            if (stoppageTime > 0) {
+                const updatedStoppage = {
+                    ...currentStoppage,
+                    stoppageTime: formatStoppageTime(stoppageTime)
+                };
+
+                setData(prevData =>
+                    prevData.map(item =>
+                        item.id === currentStoppage.id ? updatedStoppage : item
+                    )
+                );
+            }
+            setCurrentStoppage(null);
         }
+        
     }, [dataEmit]);
+
+    useEffect(() => {
+        const saveAndClearData = () => {
+            exportToExcel();
+            setData([]);
+        };
+
+        const timeout = setTimeout(saveAndClearData, 24 * 60 * 60 * 1000);
+
+        return () => {
+            clearTimeout(timeout);
+        };
+    }, []);
+
+    const formatStoppageTime = (timeInMilliseconds) => {
+        if (timeInMilliseconds <= 0) {
+            return '0 ms';
+        } else if (timeInMilliseconds < 1000) {
+            return `${timeInMilliseconds} ms`;
+        } else if (timeInMilliseconds < 60000) {
+            return `${(timeInMilliseconds / 1000).toFixed(2)} s`;
+        } else if (timeInMilliseconds < 3600000) {
+            return `${(timeInMilliseconds / 60000).toFixed(2)} min`;
+        } else {
+            return `${(timeInMilliseconds / 3600000).toFixed(2)} h`;
+        }
+    };
 
     const handleText = (e, id) => {
         setTextInputs({
@@ -45,35 +92,74 @@ const StopReport = ({ dataEmit }) => {
                 item.id === id ? { ...item, remarks: textInputs[id] || '' } : item
             )
         );
+        setEditing({ ...editing, [id]: false });
+    };
+
+    const handleEdit = (id) => {
+        setEditing({ ...editing, [id]: true });
+        setTextInputs({ ...textInputs, [id]: data.find(item => item.id === id).remarks });
     };
 
     const handleClearData = () => {
-        setData([]); // Clear all data
+        setData([]);
+        setTextInputs({});
+        setEditing({});
     };
 
-    const exportToExcel = () => {
-        const worksheet = XLSX.utils.json_to_sheet(data);
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
+    const exportToExcel = async () => {
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Real Time Stoppage Report');
 
-        // Generate a binary string of the workbook
-        const wbout = XLSX.write(workbook, { bookType: 'xlsx', type: 'binary' });
+        // Define column headers and their styling
+        worksheet.columns = [
+            { header: 'S.No', key: 'sNo', width: 10 },
+            { header: 'ID', key: 'id', width: 36 },
+            { header: 'Date', key: 'date', width: 15 },
+            { header: 'Time', key: 'time', width: 15 },
+            { header: 'Stoppage Time', key: 'stoppageTime', width: 20 },
+            { header: 'Remarks', key: 'remarks', width: 50 }
+        ];
 
-        // Convert the binary string to a Blob
-        const blob = new Blob([s2ab(wbout)], { type: "application/octet-stream" });
+        // Add header styling
+        worksheet.getRow(1).eachCell(cell => {
+            cell.font = { bold: true, color: { argb: 'FFFFFF' } };
+            cell.fill = {
+                type: 'pattern',
+                pattern: 'solid',
+                fgColor: { argb: '4472C4' },
+            };
+        });
 
-        // Save the file using FileSaver.js
-        saveAs(blob, "data.xlsx");
-    };
+        // Add rows
+        data.forEach((item, index) => {
+            worksheet.addRow({
+                sNo: index + 1,
+                id: item.id,
+                date: item.date,
+                time: item.time,
+                stoppageTime: item.stoppageTime,
+                remarks: item.remarks
+            });
+        });
 
-    // Utility function to convert a string to an ArrayBuffer
-    const s2ab = (s) => {
-        const buf = new ArrayBuffer(s.length);
-        const view = new Uint8Array(buf);
-        for (let i = 0; i < s.length; i++) {
-            view[i] = s.charCodeAt(i) & 0xFF;
-        }
-        return buf;
+        // Apply styling to data rows
+        worksheet.eachRow((row, rowNumber) => {
+            if (rowNumber > 1) {
+                row.eachCell((cell) => {
+                    cell.border = {
+                        top: { style: 'thin' },
+                        left: { style: 'thin' },
+                        bottom: { style: 'thin' },
+                        right: { style: 'thin' }
+                    };
+                });
+            }
+        });
+
+        // Generate the Excel file and trigger the download
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: "application/octet-stream" });
+        saveAs(blob, "RealTimeStoppageReport.xlsx");
     };
 
     return (
@@ -88,33 +174,37 @@ const StopReport = ({ dataEmit }) => {
                 <div className='cell id'>ID</div>
                 <div className='cell date'>Date</div>
                 <div className='cell time'>Time</div>
+                <div className='cell stoppage-time'>Stoppage Time</div>
                 <div className='cell remark'>Remarks</div>
                 {data.map((el, index) => (
-                    <React.Fragment key={index}>
+                    <React.Fragment key={el.id}>
                         <div className='cell serial'>{index + 1}</div>
                         <div className='cell id'>{el.id}</div>
                         <div className='cell date'>{el.date}</div>
                         <div className='cell time'>{el.time}</div>
+                        <div className='cell stoppage-time'>{el.stoppageTime}</div>
                         <div className='cell remark'>
-                            {el.remarks !== '' ? (
-                                el.remarks
-                            ) : (
-                                <>
+                            {editing[el.id] ? (
+                                <div className='edit'>
                                     <input
                                         type="text"
                                         onChange={(e) => handleText(e, el.id)}
                                         value={textInputs[el.id] || ''}
-                                        placeholder="Add remark"
+                                        placeholder="Edit remark"
                                     />
-                                    <button onClick={() => handleClick(el.id)}>Add</button>
-                                </>
+                                    <button onClick={() => handleClick(el.id)}>Save</button>
+                                </div>
+                            ) : (
+                                <div className='edit'>
+                                    <div className='text'>{el.remarks}</div>
+                                    <button onClick={() => handleEdit(el.id)}>Edit</button>
+                                </div>
                             )}
                         </div>
                     </React.Fragment>
                 ))}
             </div>
             <div className="buttons">
-
                 <button onClick={exportToExcel}>Export to Excel</button>
                 <button onClick={handleClearData}>Clear Data</button>
             </div>
@@ -125,41 +215,50 @@ const StopReport = ({ dataEmit }) => {
 const Wrapper = styled.div`
     color: #4deeea;
     background-color: #0e254a;
-    nav-inner{
-    text-align: center;
-    color: #4deeea;
-    }
-    .nav{
-    background-color: #0e254a;
-    display: flex;
-    justify-content: space-evenly;
-    font-size: 2.8rem;
+    .edit {
+        display: flex;
+        flex-direction: column;
     }
 
-    .buttons button{
+    .nav-inner {
+        text-align: center;
+        color: #4deeea;
+    }
+
+    .nav {
+        background-color: #0e254a;
+        display: flex;
+        justify-content: space-evenly;
+        font-size: 2.8rem;
+    }
+
+    .buttons button {
         padding: 0.3rem;
     }
-    .nav{
-    grid-column:1/-1;
+
+    .nav {
+        grid-column: 1/-1;
     }
-    .buttons{
+
+    .buttons {
         display: flex;
         width: 100%;
         height: 100px;
         justify-content: space-evenly;
         align-items: center;
     }
-    button{
+
+    button {
         background-color: #82ca9d;
-        width: 10%;
         border: none;
-    }   
+    }
+
     .table {
         display: grid;
-        grid-template-columns: 0.1fr 0.2fr 0.4fr 0.4fr 1fr;
+        grid-template-columns: 0.1fr 0.3fr 0.4fr 0.4fr 0.6fr 1fr;
         gap: 3.5px;
         border: 1px solid #ccc;
-         max-height: 65vh; /* Adjust based on the height of your rows */
+        max-height: 65vh;
         overflow-y: auto;
     }
 
@@ -171,38 +270,12 @@ const Wrapper = styled.div`
         text-overflow: ellipsis;
     }
 
-    .cell.serial {
-        grid-column: 1/2;
-    }
-
-    .cell.id {
-        grid-column: 2/3;
-    }
-
-    .cell.date {
-        grid-column: 3/4;
-        color: #82ca9d;
-    }
-
-    .cell.time {
-        grid-column: 4/5;
-        color: #8884d8;
-    }
-
-    .cell.remark {
-        grid-column: 5/6;
-        display: flex;
-        justify-content: space-evenly;
-    }
-    input{
-        width: 50%;
-        padding: 0.3rem;
-    }
-    input:focus {
-		outline: none;
-	}
-    
-    
+    .cell.serial { grid-column: 1/2; }
+    .cell.id { grid-column: 2/3; }
+    .cell.date { grid-column: 3/4; color: #82ca9d; }
+    .cell.time { grid-column: 4/5; color: #8884d8; }
+    .cell.stoppage-time { grid-column: 5/6; color: #d88484; }
+    .cell.remark { grid-column: 6/7; display: flex; justify-content: space-evenly; }
 `;
 
 export default StopReport;
